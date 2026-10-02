@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: go.mod
 
       - name: Apply migrations
         env:
@@ -44,4 +44,6 @@ jobs:
       - name: Test
         env:
           TEST_DATABASE_URL: "postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
-        run: go test -count=1 -race -cover ./tests
+        run: |
+          go test -count=1 -race -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
+          go tool cover -func=cover_services.out | tail -1

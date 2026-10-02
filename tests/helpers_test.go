@@ -35,8 +35,18 @@ func testDSN() string {
 	return config.LoadConfig().DBDSN
 }
 
+// failOrSkip: в CI недоступная БД — это ошибка, локально — пропуск теста
+// GitHub Actions выставляет CI=true, локально переменная не задана
+func failOrSkip(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // openTestPool подключается к БД
-// Если БД недоступна, тест пропускается (запуск: docker-compose up -d db)
+// Локально без БД тест пропускается, в CI — падает (чтобы не пропустить отсутствие PostgreSQL)
 func openTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
@@ -51,11 +61,11 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		t.Skipf("БД недоступна, тест пропущен (docker-compose up -d db): %v", err)
+		failOrSkip(t, "БД недоступна (docker-compose up -d db): %v", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		t.Skipf("БД недоступна, тест пропущен (docker-compose up -d db): %v", err)
+		failOrSkip(t, "БД недоступна (docker-compose up -d db): %v", err)
 	}
 	t.Cleanup(pool.Close)
 

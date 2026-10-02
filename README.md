@@ -362,7 +362,14 @@ gofmt -l .
 - `tests/concurrency_test.go` — гонки: параллельные deposit и withdraw, обратное давление очереди, конкурентные `Submit` и `Close`, `TestRaceCondition`
 - `tests/helpers_test.go` — `testEnv` для сборки приложения в тестах
 
-Интеграционные и concurrency-тесты подключаются к БД через `helpers_test.go` → `openTestPool`. Если `pool.Ping` не проходит, тест пропускается через `t.Skipf` — вне зависимости от того, задана `TEST_DATABASE_URL` или нет. Тесты не падают на недоступной БД, а именно пропускаются. Unit-тесты из `api_test.go` не используют БД и выполняются всегда.
+Интеграционные и concurrency-тесты подключаются к БД через `helpers_test.go` → `openTestPool`. Поведение при недоступной БД зависит от окружения:
+
+- **локально** (`CI` не задана) — тест пропускается через `t.Skipf`;
+- **в CI** (`CI=true`, GitHub Actions выставляет автоматически) — тест падает через `t.Fatalf`.
+
+Это защищает от ситуации, когда в CI Postgres не поднялся, все DB-тесты молча пропустились, а job остался зеленым с покрытием 27.8% вместо 88.9%.
+
+Unit-тесты из `api_test.go` не используют БД и выполняются всегда.
 
 ### Покрытие
 
@@ -402,9 +409,11 @@ GitHub Actions (`.github/workflows/ci.yml`) на каждый `push` и `pull_re
 1. Поднимает `postgres:15-alpine` как service-контейнер с healthcheck через `pg_isready`.
 2. Применяет `migrations/init.sql`.
 3. `go vet ./...`
-4. `go test -count=1 -race -cover ./tests` с `TEST_DATABASE_URL`, указывающим на service-контейнер.
+4. `go test -count=1 -race -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests` и печатает итоговую строку покрытия — ту же, что и локально.
 
-Версия Go в CI — `1.26`, как и в `go.mod` и `Dockerfile`.
+Версия Go в CI берется из `go.mod` через `go-version-file`.
+
+Важная деталь: `openTestPool` при недоступной БД вызывает `t.Skipf` локально, но `t.Fatalf`, если задана переменная окружения `CI` (GitHub Actions выставляет `CI=true`). Это защищает от ситуации, когда в CI Postgres не поднялся, все DB-тесты молча пропустились, а job остался зеленым с покрытием 27.8% вместо 88.9%.
 
 ## Troubleshooting
 
@@ -461,6 +470,8 @@ export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5433/finops?sslmode=dis
 - `TEST_DATABASE_URL` указывает на другой Postgres (например, нативный на `127.0.0.1:5432`);
 - `localhost` резолвится в другой адрес (см. ниже).
 
+В CI (`CI=true`) та же ситуация приведет не к SKIP, а к падению теста — так задумано, чтобы зеленый CI не скрывал отсутствие БД.
+
 **Решение**:
 
 ```bash
@@ -469,11 +480,11 @@ export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=dis
 go test -count=1 ./tests -v
 ```
 
-### Тесты падают с ошибкой аутентификации
+### Тесты пропускаются с ошибкой аутентификации
 
-**Причина**: `TEST_DATABASE_URL` указывает на Postgres с другими учетными данными (например, нативный Postgres на `localhost`, куда `pgx` попадает через IPv6).
+**Причина**: `TEST_DATABASE_URL` указывает на Postgres с другими учетными данными (например, нативный Postgres на `localhost`, куда `pgx` попадает через IPv6). `openTestPool` не может пройти `Ping` и пропускает тест.
 
-**Решение**: указывайте `127.0.0.1` явно, а не `localhost`.
+**Решение**: указывайте `127.0.0.1` явно, а не `localhost`. Причина видна в выводе `go test -v` в строке с меткой `SKIP` и текстом ошибки.
 
 ### `go test` использует кешированные результаты
 
