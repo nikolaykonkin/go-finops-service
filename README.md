@@ -4,10 +4,26 @@
 
 Реализован в рамках кейса «Go-Backend Challenge: Построй микросервис» из библиотеки кейсов Нетологии для Go-разработчиков.
 
+## Содержание
+
+- [Структура проекта](#структура-проекта)
+- [Что было дано](#что-было-дано)
+- [Что реализовано](#что-реализовано)
+- [Ключевые решения](#ключевые-решения)
+- [Переменные окружения](#переменные-окружения)
+- [Архитектура и оптимизации](#архитектура-и-оптимизации)
+- [API Эндпоинты](#api-эндпоинты)
+- [Примеры использования](#примеры-использования)
+- [Разработка](#разработка)
+- [Troubleshooting](#troubleshooting)
+- [Ограничения](#ограничения)
+- [Запуск](#запуск)
+- [Стек](#стек)
+
 ## Структура проекта
 
 ```
-finops-service/
+go-finops-service/
 ├── server/
 │   └── main.go                    — точка входа: конфиг, DI, роутинг, graceful shutdown
 ├── internal/
@@ -48,7 +64,7 @@ finops-service/
 
 Шаблон микросервиса с готовой архитектурой и каркасом кода. Требовалось реализовать недостающие методы, покрыть тестами и упаковать в Docker.
 
-Структура шаблона: `internal/{api,config,db,middleware,models,processor, repositories,services}`, `migrations/init.sql`, `tests/`, `Dockerfile.template`.
+Структура шаблона: `internal/{api,config,db,middleware,models,processor,repositories,services}`, `migrations/init.sql`, `tests/`, `Dockerfile.template`.
 
 ## Что реализовано
 
@@ -65,7 +81,8 @@ finops-service/
 - `internal/services/transaction_service.go`:
   - `ValidateTransaction` — проверяет `user_id`, тип (`deposit` или `withdraw`), сумму (положительная, до 2 знаков после запятой, не больше `NUMERIC(10,2)`)
   - `CreateTransaction` — валидирует, проверяет существование пользователя и достаточность средств для withdraw, сохраняет запись со `processed = false` (баланс здесь не меняется — его применяет процессор ровно один раз)
-  - `GetTransaction`, `UpdateTransaction` (только необработанные), `DeleteTransaction` (с реверсом баланса для обработанных транзакций в одной БД-транзакции)
+  - `GetTransaction`, `UpdateTransaction` (только необработанные)
+  - `DeleteTransaction` — удаляет запись; для уже обработанной транзакции в той же БД-транзакции возвращает баланс (реверс). Если реверс уводит баланс в минус — `ErrInsufficientFunds` → 409, удаление отклоняется целиком
 
 ### HTTP API
 
@@ -108,14 +125,7 @@ finops-service/
 - `tests/concurrency_test.go` — гонки: параллельные deposit и withdraw, обратное давление очереди, конкурентные `Submit` и `Close`, `TestRaceCondition`
 - `tests/helpers_test.go` — `testEnv` для сборки приложения в тестах
 
-Запуск тестов:
-
-```bash
-go test ./tests -v
-go test -race ./tests -v
-```
-
-Если БД недоступна, интеграционные и concurrency-тесты пропускаются через `t.Skip`, unit-тесты выполняются всегда.
+Интеграционные и concurrency-тесты подключаются к БД через `helpers_test.go` → `openTestPool`. Если `pool.Ping` не проходит, тест пропускается через `t.Skipf` — вне зависимости от того, задана `TEST_DATABASE_URL` или нет. Тесты не падают на недоступной БД, а именно пропускаются. Unit-тесты из `api_test.go` не используют БД и выполняются всегда. Команды запуска — в разделе «Запуск → Тесты».
 
 Покрытие `internal/services` зависит от того, поднята ли БД:
 
@@ -124,27 +134,38 @@ go test -race ./tests -v
 | БД запущена | **88.9%** | unit + integration + concurrency |
 | БД недоступна | **27.8%** | только unit-тесты, остальные SKIP |
 
-Интеграционные и concurrency-тесты требуют PostgreSQL. Если БД недоступна, они пропускаются через `t.Skip` — это видно в выводе `go test -v` как `SKIP`, а не `PASS`. Чтобы получить реальное покрытие, сначала поднимите БД:
+Чтобы получить реальное покрытие, сначала поднимите БД:
 
 ```bash
 docker compose up -d db
-go test -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
+export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
+go test -count=1 -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
 go tool cover -func=cover_services.out | tail -1
 ```
 
+Обратите внимание: в `TEST_DATABASE_URL` адрес указан явно — `127.0.0.1`, а не `localhost`. На macOS `localhost` резолвится одновременно в IPv6 (`::1`) и IPv4 (`127.0.0.1`). Если на одном из адресов слушает другой Postgres (например, установленный нативно), `pgx` уйдет не туда и тесты упадут с `connection refused` или `password authentication failed`. Явное `127.0.0.1` снимает эту неоднозначность.
+
 ### Контейнеризация
 
-- `Dockerfile` — multi-stage: build в `golang:1.25-alpine`, runtime в `alpine:3.20`. Бинарник собирается без CGO (`CGO_ENABLED=0`), контейнер запускается под непривилегированным пользователем, есть `HEALTHCHECK` через `/health`
+- `Dockerfile` — multi-stage: build в `golang:1.26-alpine`, runtime в `alpine:3.20`. Бинарник собирается без CGO (`CGO_ENABLED=0`), контейнер запускается под непривилегированным пользователем, есть `HEALTHCHECK` через `/health`
 - `docker-compose.yml` — сервисы `db` (PostgreSQL) и `app`, приложение стартует только после `service_healthy` у БД
 
 ## Ключевые решения
 
-**Баланс меняет только процессор.** В `CreateTransaction` запись сохраняется со `processed = false` без изменения баланса. Если бы баланс менялся и там, и в процессоре, каждая операция учитывалась бы дважды. Семантика `processed` = «баланс обновлен» становится однозначной.
+**Баланс при создании транзакции меняет только процессор.** В `CreateTransaction` запись сохраняется со `processed = false` без изменения баланса. Если бы баланс менялся и там, и в процессоре, каждая операция учитывалась бы дважды. Семантика `processed` = «баланс обновлен» становится однозначной.
+
+**Единственное исключение — `DeleteTransaction`.** При удалении уже обработанной транзакции баланс возвращается в той же БД-транзакции (реверс: deposit списывается, withdraw возвращается). Если реверс уводит баланс в минус, `UpdateBalance` вернет `ErrInsufficientFunds`, и удаление откатится целиком. Поведение покрыто тестом `TestDeleteTransaction/реверс_баланса_для_обработанной_транзакции`.
+
 **Порядок проверок в `CreateTransaction`.** Проверка пользователя и баланса выполняется до `pool.Begin`. Репозитории читают через пул, и при полностью занятом пуле запрос, удерживающий соединение под `Begin` и ожидающий второго соединения для чтения, заблокировал бы сам себя.
+
 **Окончательная проверка средств — в процессоре.** Предварительная проверка в сервисе может устареть к моменту обработки. Процессор перечитывает транзакцию и баланс под `FOR UPDATE` и `FOR NO KEY UPDATE` и отклоняет операцию, если средств не хватает. Транзакция остается `processed = false`: в схеме нет статуса ошибки.
-**Sentinel-ошибки.** Слой данных возвращает `ErrUserNotFound` и другие, сервис и обработчики маппят их через `errors.Is` в HTTP-статусы. Это позволяет различать 404 (не найдено), 400 (валидация), 409 (конфликт) и 500 (внутреннее)
+
+**Sentinel-ошибки.** Слой данных возвращает `ErrUserNotFound` и другие, сервис и обработчики маппят их через `errors.Is` в HTTP-статусы. Это позволяет различать 404 (не найдено), 400 (валидация), 409 (конфликт) и 500 (внутреннее).
+
 **Retry Ping в `NewPool`.** В `docker-compose` приложение может стартовать раньше, чем Postgres начнет принимать TCP-подключения. Ping с интервалом 1 секунда и общим таймаутом 30 секунд убирает гонку старта.
+
 **Healthcheck в `docker-compose` через TCP (`-h 127.0.0.1`).** Во время выполнения `init.sql` временный сервер Postgres слушает только Unix-сокет, и обычная проверка `pg_isready -U user -d finops` сообщила бы о готовности раньше времени, из-за чего приложение могло упасть при старте.
+
 **Строгий разбор JSON.** `MaxBytesReader`, `DisallowUnknownFields`, проверка отсутствия данных после первого JSON-значения. Тесты покрывают все ветки.
 
 ## Переменные окружения
@@ -156,6 +177,7 @@ go tool cover -func=cover_services.out | tail -1
 | `DB_DSN` | — | Строка подключения к PostgreSQL, приоритетнее `DATABASE_URL` |
 | `DATABASE_URL` | — | Строка подключения к PostgreSQL, используется, если `DB_DSN` не задан |
 | `PORT` | `8080` | Порт HTTP-сервера |
+| `TEST_DATABASE_URL` | — | DSN тестовой БД; только для `go test`. Если не задана, используется `DB_DSN`/`DATABASE_URL` из конфига |
 
 Если ни `DB_DSN`, ни `DATABASE_URL` не заданы, используется строка по умолчанию: `postgres://user:pass@db:5432/finops?sslmode=disable`.
 
@@ -203,11 +225,11 @@ PostgreSQL
 ### Работа с БД
 
 - **Connection pooling**: `pgxpool` с `MaxConns = 20`
-- **ACID-транзакции**: создание транзакции и обновление баланса — в одной БД-транзакции
+- **ACID-транзакции**: три независимых сценария, каждый в своей БД-транзакции — создание записи (`CreateTransaction`), обработка процессором (`process`: блокировка, проверка баланса, `UPDATE balance`, `UPDATE processed`), удаление с реверсом (`DeleteTransaction`: `DELETE` записи + `UPDATE balance` для уже обработанной). При создании баланс не меняется — его применяет процессор (см. «Ключевые решения»)
 - **Блокировки строк**: `SELECT ... FOR UPDATE` для транзакций, `SELECT ... FOR NO KEY UPDATE` для пользователей — предотвращают race conditions
 - **Параметризованные запросы** (`$1`, `$2`) — защита от SQL-инъекций
 - **Индексы**: `idx_transactions_user_id` ускоряет выборки по пользователю
-- **`CHECK (amount > 0)`** и `CHECK` на баланс — защита на уровне схемы
+- **`CHECK (amount > 0)`** на сумме транзакции — защита на уровне схемы. Баланс в БД не защищен CHECK-ограничением; неотрицательность обеспечивается условием `balance + amount >= 0` в самом UPDATE (`user_repo.go`)
 
 ### Устойчивость
 
@@ -347,11 +369,9 @@ if err := dbTx.Commit(ctx); err != nil {
 
 ### Запуск проверок
 
-```bash
-docker compose up -d db
+Полный блок команд для тестов — в разделе «Запуск → Тесты». Дополнительно:
 
-go test ./tests -v
-go test -race ./tests -v
+```bash
 go vet ./...
 gofmt -l .
 ```
@@ -369,8 +389,7 @@ docker compose ps
 docker compose logs db
 ```
 
-`NewPool` повторяет `Ping` до 30 секунд, так что короткие задержки
-старта не приводят к падению.
+`NewPool` повторяет `Ping` до 30 секунд, так что короткие задержки старта не приводят к падению.
 
 ### Healthcheck не проходит
 
@@ -397,28 +416,34 @@ lsof -i :5432
 
 Остановить процесс или изменить порт в `docker-compose.yml` и переменной `PORT`.
 
+Если на `5432` сидит нативный Postgres (Homebrew, Postgres.app), а контейнер `db` не может занять порт — поменяйте маппинг в `docker-compose.yml` на `"5433:5432"` и указывайте его в `TEST_DATABASE_URL`:
+
+```bash
+export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5433/finops?sslmode=disable"
+```
+
 ### Тесты пропускаются (SKIP)
 
-**Причина**: `docker compose up -d db` не выполнен. Интеграционные и concurrency-тесты пропускаются через `t.Skip`, если БД недоступна.
+**Причина**: `openTestPool` не смог подключиться к БД (`pool.Ping` вернул ошибку). Это происходит, если:
+
+- `docker compose up -d db` не выполнен;
+- `TEST_DATABASE_URL` не задана, а дефолтный DSN из конфига указывает не на finops;
+- `TEST_DATABASE_URL` указывает на другой Postgres (например, нативный на `127.0.0.1:5432`);
+- `localhost` резолвится в другой адрес (см. ниже).
 
 **Решение**:
 
 ```bash
 docker compose up -d db
-go test ./tests -v
+export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
+go test -count=1 ./tests -v
 ```
 
-### Тесты падают: `connection refused`
+### Тесты падают с ошибкой аутентификации
 
-**Причина**: контейнер БД еще не готов.
+**Причина**: `TEST_DATABASE_URL` указывает на Postgres с другими учетными данными (например, нативный Postgres на `localhost`, куда `pgx` попадает через IPv6).
 
-**Решение**:
-
-```bash
-docker compose ps
-# дождаться статуса "healthy"
-go test ./tests -v
-```
+**Решение**: указывайте `127.0.0.1` явно, а не `localhost`.
 
 ### `go test` использует кешированные результаты
 
@@ -426,7 +451,7 @@ go test ./tests -v
 
 ```bash
 go clean -testcache
-go test ./tests -v
+go test -count=1 ./tests -v
 ```
 
 ## Ограничения
@@ -434,6 +459,7 @@ go test ./tests -v
 - Необработанные транзакции не подхватываются автоматически после перезапуска приложения: для этого нужен стартовый `RecoverPending` (задание этого не требовало)
 - Поле `processed` при `false` отсутствует в JSON из-за `omitempty` в модели (поведение зафиксировано тестом)
 - `PUT /transactions/{id}` не пересчитывает баланс: изменение суммы или типа необработанной транзакции отразится на балансе при обработке
+- Если `withdraw` отклонен процессором из-за нехватки средств, запись остается `processed = false` и не повторяется: в схеме нет статуса ошибки, а автоматического ретрая нет
 
 ## Запуск
 
@@ -480,7 +506,7 @@ psql -d finops -f migrations/init.sql
 3. Задать переменные окружения:
 
 ```bash
-export DATABASE_URL="postgres://user:pass@localhost:5432/finops?sslmode=disable"
+export DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
 export PORT=8080
 ```
 
@@ -490,26 +516,22 @@ export PORT=8080
 go run server/main.go
 ```
 
-Тесты:
+### Тесты
 
 ```bash
 docker compose up -d db
-go test ./tests -v
-go test -race ./tests -v
+export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
+
+go test -count=1 -race ./tests -v
+go test -count=1 -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
+go tool cover -func=cover_services.out | tail -1
 ```
 
 ## Стек
 
-- Go 1.25
+- Go 1.26
 - PostgreSQL 15
 - `github.com/jackc/pgx/v5` — драйвер и пул
 - `github.com/shopspring/decimal` — деньги без потери точности
 - `net/http` — HTTP-сервер, маршрутизация через `ServeMux` с шаблонами путей (Go 1.22+)
 - Docker, Docker Compose
-
-## Ссылки
-
-- [PostgreSQL документация](https://www.postgresql.org/docs/)
-- [pgx драйвер](https://github.com/jackc/pgx)
-- [shopspring/decimal](https://github.com/shopspring/decimal)
-- [Go стандартная библиотека](https://golang.org/pkg/)
