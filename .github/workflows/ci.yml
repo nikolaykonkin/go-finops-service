@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: finops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U user -d finops -h 127.0.0.1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Apply migrations
+        env:
+          PGPASSWORD: pass
+        run: |
+          psql -h 127.0.0.1 -U user -d finops -f migrations/init.sql
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          TEST_DATABASE_URL: "postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
+        run: go test -count=1 -race -cover ./tests

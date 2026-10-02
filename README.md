@@ -1,5 +1,7 @@
 # go-finops-service
 
+![CI](https://github.com/nikolaykonkin/go-finops-service/actions/workflows/ci.yml/badge.svg)
+
 Микросервис для обработки финансовых операций на Go: REST API, PostgreSQL, асинхронная обработка через worker pool, ACID-транзакции, Docker.
 
 Реализован в рамках кейса «Go-Backend Challenge: Построй микросервис» из библиотеки кейсов Нетологии для Go-разработчиков.
@@ -15,6 +17,7 @@
 - [API Эндпоинты](#api-эндпоинты)
 - [Примеры использования](#примеры-использования)
 - [Разработка](#разработка)
+- [Тестирование](#тестирование)
 - [Troubleshooting](#troubleshooting)
 - [Ограничения](#ограничения)
 - [Запуск](#запуск)
@@ -54,6 +57,7 @@ go-finops-service/
 │   ├── concurrency_test.go        — тесты конкурентности и race conditions
 │   ├── helpers_test.go            — testEnv: сборка приложения для тестов
 │   └── integration_test.go        — интеграционные тесты с реальной БД
+├── .github/workflows/ci.yml       — GitHub Actions: Postgres service + go vet + go test -race
 ├── docker-compose.yml             — сервисы db (PostgreSQL) и app
 ├── Dockerfile                     — multi-stage сборка
 ├── go.mod                         — модуль и зависимости
@@ -117,33 +121,6 @@ go-finops-service/
   - `signal.NotifyContext` для SIGINT и SIGTERM
   - `http.Server` с таймаутами: `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`
   - Graceful shutdown: сначала `srv.Shutdown`, затем `proc.Close` (дорабатывает очередь), затем закрытие пула
-
-### Тесты
-
-- `tests/api_test.go` — без БД: сериализация JSON, валидация типов и сумм, HTTP-контракт для 400 и 405, recovery middleware, `TestCreateTransactionRequest` покрывает 13 сценариев ошибочного тела запроса
-- `tests/integration_test.go` — с реальной БД: CRUD, реверс баланса, нехватка средств, несуществующие сущности
-- `tests/concurrency_test.go` — гонки: параллельные deposit и withdraw, обратное давление очереди, конкурентные `Submit` и `Close`, `TestRaceCondition`
-- `tests/helpers_test.go` — `testEnv` для сборки приложения в тестах
-
-Интеграционные и concurrency-тесты подключаются к БД через `helpers_test.go` → `openTestPool`. Если `pool.Ping` не проходит, тест пропускается через `t.Skipf` — вне зависимости от того, задана `TEST_DATABASE_URL` или нет. Тесты не падают на недоступной БД, а именно пропускаются. Unit-тесты из `api_test.go` не используют БД и выполняются всегда. Команды запуска — в разделе «Запуск → Тесты».
-
-Покрытие `internal/services` зависит от того, поднята ли БД:
-
-| Состояние БД | Покрытие | Что выполняется |
-|---|---|---|
-| БД запущена | **88.9%** | unit + integration + concurrency |
-| БД недоступна | **27.8%** | только unit-тесты, остальные SKIP |
-
-Чтобы получить реальное покрытие, сначала поднимите БД:
-
-```bash
-docker compose up -d db
-export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
-go test -count=1 -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
-go tool cover -func=cover_services.out | tail -1
-```
-
-Обратите внимание: в `TEST_DATABASE_URL` адрес указан явно — `127.0.0.1`, а не `localhost`. На macOS `localhost` резолвится одновременно в IPv6 (`::1`) и IPv4 (`127.0.0.1`). Если на одном из адресов слушает другой Postgres (например, установленный нативно), `pgx` уйдет не туда и тесты упадут с `connection refused` или `password authentication failed`. Явное `127.0.0.1` снимает эту неоднозначность.
 
 ### Контейнеризация
 
@@ -369,12 +346,65 @@ if err := dbTx.Commit(ctx); err != nil {
 
 ### Запуск проверок
 
-Полный блок команд для тестов — в разделе «Запуск → Тесты». Дополнительно:
+Полный блок команд для тестов — в разделе «Тестирование». Дополнительно:
 
 ```bash
 go vet ./...
 gofmt -l .
 ```
+
+## Тестирование
+
+### Что тестируется
+
+- `tests/api_test.go` — без БД: сериализация JSON, валидация типов и сумм, HTTP-контракт для 400 и 405, recovery middleware, `TestCreateTransactionRequest` покрывает 13 сценариев ошибочного тела запроса
+- `tests/integration_test.go` — с реальной БД: CRUD, реверс баланса, нехватка средств, несуществующие сущности
+- `tests/concurrency_test.go` — гонки: параллельные deposit и withdraw, обратное давление очереди, конкурентные `Submit` и `Close`, `TestRaceCondition`
+- `tests/helpers_test.go` — `testEnv` для сборки приложения в тестах
+
+Интеграционные и concurrency-тесты подключаются к БД через `helpers_test.go` → `openTestPool`. Если `pool.Ping` не проходит, тест пропускается через `t.Skipf` — вне зависимости от того, задана `TEST_DATABASE_URL` или нет. Тесты не падают на недоступной БД, а именно пропускаются. Unit-тесты из `api_test.go` не используют БД и выполняются всегда.
+
+### Покрытие
+
+Покрытие `internal/services` зависит от того, поднята ли БД:
+
+| Состояние БД | Покрытие | Что выполняется |
+|---|---|---|
+| БД запущена | **88.9%** | unit + integration + concurrency |
+| БД недоступна | **27.8%** | только unit-тесты, остальные SKIP |
+
+Чтобы получить реальное покрытие, сначала поднимите БД:
+
+```bash
+docker compose up -d db
+export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
+go test -count=1 -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
+go tool cover -func=cover_services.out | tail -1
+```
+
+Обратите внимание: в `TEST_DATABASE_URL` адрес указан явно — `127.0.0.1`, а не `localhost`. На macOS `localhost` резолвится одновременно в IPv6 (`::1`) и IPv4 (`127.0.0.1`). Если на одном из адресов слушает другой Postgres (например, установленный нативно), `pgx` уйдет не туда и тесты упадут с `connection refused` или `password authentication failed`. Явное `127.0.0.1` снимает эту неоднозначность.
+
+### Команды запуска
+
+```bash
+docker compose up -d db
+export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
+
+go test -count=1 -race ./tests -v
+go test -count=1 -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
+go tool cover -func=cover_services.out | tail -1
+```
+
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) на каждый `push` и `pull_request`:
+
+1. Поднимает `postgres:15-alpine` как service-контейнер с healthcheck через `pg_isready`.
+2. Применяет `migrations/init.sql`.
+3. `go vet ./...`
+4. `go test -count=1 -race -cover ./tests` с `TEST_DATABASE_URL`, указывающим на service-контейнер.
+
+Версия Go в CI — `1.26`, как и в `go.mod` и `Dockerfile`.
 
 ## Troubleshooting
 
@@ -516,17 +546,6 @@ export PORT=8080
 go run server/main.go
 ```
 
-### Тесты
-
-```bash
-docker compose up -d db
-export TEST_DATABASE_URL="postgres://user:pass@127.0.0.1:5432/finops?sslmode=disable"
-
-go test -count=1 -race ./tests -v
-go test -count=1 -coverprofile=cover_services.out -coverpkg=./internal/services/... ./tests
-go tool cover -func=cover_services.out | tail -1
-```
-
 ## Стек
 
 - Go 1.26
@@ -535,3 +554,4 @@ go tool cover -func=cover_services.out | tail -1
 - `github.com/shopspring/decimal` — деньги без потери точности
 - `net/http` — HTTP-сервер, маршрутизация через `ServeMux` с шаблонами путей (Go 1.22+)
 - Docker, Docker Compose
+- GitHub Actions — CI: Postgres service + `go vet` + `go test -race`
